@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"text/template"
 )
@@ -53,83 +54,97 @@ func startSIPServer(sipPort string) error {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			log.Println("unable to accept connection: ", err)
+			log.Println("unable to accept connection:", err)
 			continue
 		}
 
-		fmt.Printf("accepted connection from: %s\n", conn.RemoteAddr())
+		log.Println("accepted connection from:", conn.RemoteAddr())
 
-		go func(c net.Conn, t *template.Template) {
-			defer c.Close()
-			// TODO: we can probably switch this over to a bufio to make it more efficient
-			data := make([]byte, 0, 1024)
-			for {
-				ch := make([]byte, 1)
-				_, err = c.Read(ch)
-				if err != nil {
-					log.Println("unable to read: ", err)
-					return
-				}
+		go handleConnection(conn, t)
+	}
+}
 
-				data = append(data, ch...)
+func handleConnection(conn net.Conn, t *template.Template) {
+	defer conn.Close()
+	// TODO: we can probably switch this over to a bufio to make it more efficient
+	data := make([]byte, 0, 1024)
+	for {
+		ch := make([]byte, 1)
+		_, err := conn.Read(ch)
+		if err != nil {
+			log.Println("unable to read:", err)
+			return
+		}
 
-				// TODO: swap out this comparison with bytes.Compare() to avoid the generation of a string
-				ds := string(data)
-				len := len(ds)
-				if len > 3 {
-					if ds[len-4:len] == "\r\n\r\n" {
-						break
-					}
-				}
+		data = append(data, ch...)
+
+		// TODO: swap out this comparison with bytes.Compare() to avoid the generation of a string
+		ds := string(data)
+		read := len(ds)
+		if read > 3 {
+			if ds[read-4:read] == "\r\n\r\n" {
+				break
 			}
+		}
+	}
 
-			contact := extractContact.Find(data)
-			if len(contact) < 1 {
-				log.Println("bad contact")
-				return
-			}
+	contact := extractContact.Find(data)
+	if len(contact) < 1 {
+		log.Println("bad contact")
+		return
+	}
 
-			via := extractVia.Find(data)
-			if len(via) < 1 {
-				log.Println("bad via")
-				return
-			}
+	via := extractVia.Find(data)
+	if len(via) < 1 {
+		log.Println("bad via")
+		return
+	}
 
-			vars := struct {
-				Via     string
-				Contact string
-			}{
-				Via:     string(via),
-				Contact: string(contact),
-			}
+	vars := struct {
+		Via     string
+		Contact string
+	}{
+		Via:     string(via),
+		Contact: string(contact),
+	}
 
-			var buff bytes.Buffer
+	var buff bytes.Buffer
 
-			err = t.Execute(&buff, vars)
-			if err != nil {
-				// TODO: failed to write template, this should never happen
-			}
+	// NOTE: we need to buffer this response. Writing directly to the
+	// connection caused the packets to get fragmented which stopped
+	// the ALG from working correctly
+	err := t.Execute(&buff, vars)
+	if err != nil {
+		log.Println("unable to execute response template:", err)
+		return
+	}
 
-			c.Write(buff.Bytes())
-			if err != nil {
-				log.Println("error sending response: ", err)
-			}
+	_, err = conn.Write(buff.Bytes())
+	if err != nil {
+		log.Println("error sending response: ", err)
+		return
+	}
 
-			matches := extractCallback.FindSubmatch(contact)
+	matches := extractCallback.FindSubmatch(contact)
 
-			if len(matches) < 2 {
-				// TODO: handle bad match
-			}
+	if len(matches) < 2 {
+		log.Println("invalid host/port in contact")
+		return
+	}
 
-			fmt.Printf("connecting back to: %s\n", string(matches[1]))
-			c2, err := net.Dial("tcp", string(matches[1]))
-			if err != nil {
-				//  TODO: handle error
-			}
+	connectBackHost := string(matches[1])
 
-			defer c2.Close()
-			c2.Write([]byte("hello world!\n"))
-		}(conn, t)
+	log.Println("connecting back to:", connectBackHost)
+	c2, err := net.Dial("tcp", connectBackHost)
+	if err != nil {
+		log.Println("unable to connect to host behind NAT:", err)
+		return
+	}
+
+	defer c2.Close()
+	_, err = c2.Write([]byte("hello from the internet!\n"))
+	if err != nil {
+		log.Println("unable to write to host behind NAT:", err)
 	}
 }
 
@@ -141,29 +156,29 @@ func setupListener(port string, wg *sync.WaitGroup) {
 	// Disabling the forwarding doesn't actually fix it.
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
-		log.Fatal("unable to open socket for listening: ", err)
+		log.Fatal("unable to open socket for listening:", err)
 	}
 
 	defer ln.Close()
 
-	fmt.Println("listening on ", port)
+	fmt.Println("listening on port:", port)
 
 	conn, err := ln.Accept()
 	if err != nil {
-		log.Fatal("unable to accept incomming connect: ", err)
+		log.Fatal("unable to accept incoming connect:", err)
 	}
 
 	defer conn.Close()
 
-	fmt.Println("accepted conection from ", conn.RemoteAddr().String())
+	fmt.Println("accepted connection from:", conn.RemoteAddr())
 
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		log.Println("unable to read from connection: ", err)
+		log.Println("unable to read from connection:", err)
 	}
 
-	fmt.Printf("received message from remote server: `%s`\n", line)
+	fmt.Printf("received message from remote server: `%s`\n", strings.TrimRight(line, "\n"))
 }
 
 func sendRequest(host, localIP, localPort, remotePort string) error {
@@ -184,6 +199,7 @@ func sendRequest(host, localIP, localPort, remotePort string) error {
 		return err
 	}
 
+	// see note above about buffering response and fragmentation
 	var buff bytes.Buffer
 	err = t.Execute(&buff, vars)
 	if err != nil {
