@@ -66,23 +66,21 @@ func startSIPServer(sipPort string) error {
 
 func handleConnection(conn net.Conn, t *template.Template) {
 	defer conn.Close()
-	// TODO: we can probably switch this over to a bufio to make it more efficient
 	data := make([]byte, 0, 1024)
+	read := 0
 	for {
 		ch := make([]byte, 1)
-		_, err := conn.Read(ch)
+		n, err := conn.Read(ch)
 		if err != nil {
 			log.Println("unable to read:", err)
 			return
 		}
 
 		data = append(data, ch...)
+		read += n
 
-		// TODO: swap out this comparison with bytes.Compare() to avoid the generation of a string
-		ds := string(data)
-		read := len(ds)
 		if read > 3 {
-			if ds[read-4:read] == "\r\n\r\n" {
+			if bytes.Compare(data[read-4:read], []byte("\r\n\r\n")) == 0 {
 				break
 			}
 		}
