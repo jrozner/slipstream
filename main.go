@@ -119,7 +119,7 @@ func handleConnection(conn net.Conn, t *template.Template) {
 
 	_, err = conn.Write(buff.Bytes())
 	if err != nil {
-		log.Println("error sending response: ", err)
+		log.Println("error sending response:", err)
 		return
 	}
 
